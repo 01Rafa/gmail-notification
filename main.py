@@ -1,11 +1,12 @@
 import asyncio
+import html
 import os
 from collections import deque
 from typing import Any
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import BaseModel
 from telegram import Bot
 
@@ -83,9 +84,18 @@ async def get_alerts() -> list[dict[str, Any]]:
 
 
 @app.post("/accounts")
-async def add_account(request: Request) -> RedirectResponse:
+async def add_account(request: Request) -> Response:
     email = await _email_from_request(request)
-    auth_url = gmail_watcher.create_authorization_url(email)
+    try:
+        auth_url = gmail_watcher.create_authorization_url(email)
+    except FileNotFoundError as exc:
+        return HTMLResponse(
+            _error_page(
+                "Falta configurar OAuth",
+                str(exc),
+            ),
+            status_code=500,
+        )
     return RedirectResponse(auth_url, status_code=303)
 
 
@@ -104,7 +114,16 @@ async def delete_account(email: str) -> dict[str, Any]:
 async def oauth2callback(request: Request) -> HTMLResponse:
     response_url = _public_callback_url(request)
     state = request.query_params.get("state")
-    account = gmail_watcher.exchange_oauth_callback(response_url, state)
+    try:
+        account = gmail_watcher.exchange_oauth_callback(response_url, state)
+    except Exception as exc:
+        return HTMLResponse(
+            _error_page(
+                "No se pudo conectar la cuenta",
+                str(exc),
+            ),
+            status_code=500,
+        )
     return HTMLResponse(
         f"""
         <!doctype html>
@@ -171,6 +190,31 @@ def _public_callback_url(request: Request) -> str:
     return str(request.url)
 
 
+def _error_page(title: str, detail: str) -> str:
+    safe_title = html.escape(title)
+    safe_detail = html.escape(detail)
+    return f"""
+    <!doctype html>
+    <html lang="es">
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>{safe_title}</title>
+        <style>
+          body {{ font-family: Arial, sans-serif; margin: 40px; color: #162033; }}
+          pre {{ white-space: pre-wrap; background: #f4f7fb; padding: 16px; border-radius: 8px; }}
+          a {{ color: #1f7a8c; }}
+        </style>
+      </head>
+      <body>
+        <h1>{safe_title}</h1>
+        <pre>{safe_detail}</pre>
+        <p><a href="/">Volver al dashboard</a></p>
+      </body>
+    </html>
+    """
+
+
 DASHBOARD_HTML = """
 <!doctype html>
 <html lang="es">
@@ -193,6 +237,8 @@ DASHBOARD_HTML = """
     .meta { color: #5b677a; font-size: 13px; }
     .row { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
     .tag { padding: 4px 8px; border-radius: 999px; background: #e8f3f6; color: #1f6674; font-size: 12px; }
+    .empty { color: #5b677a; margin: 12px 0 0; }
+    .error { color: #9d1c1c; background: #fff2f2; border: 1px solid #f0b8b8; padding: 10px; border-radius: 6px; }
     ul { padding-left: 18px; }
     a { color: #1f7a8c; word-break: break-all; }
   </style>
@@ -209,6 +255,7 @@ DASHBOARD_HTML = """
         <input id="account-email" name="email" type="email" placeholder="cuenta@gmail.com" required>
         <button type="submit">Agregar cuenta</button>
       </form>
+      <p id="accounts-status" class="empty"></p>
       <ul id="accounts"></ul>
     </section>
 
@@ -281,8 +328,16 @@ DASHBOARD_HTML = """
     }
 
     async function loadAccounts() {
+      const status = document.getElementById("accounts-status");
       const response = await fetch("/accounts");
+      if (!response.ok) {
+        status.className = "error";
+        status.textContent = "No se pudieron cargar las cuentas conectadas.";
+        return;
+      }
       const data = await response.json();
+      status.className = "empty";
+      status.textContent = data.length ? "" : "No hay cuentas Gmail conectadas todavia.";
       document.getElementById("accounts").innerHTML = data.map(account => `
         <li>${account.email} <button onclick="deleteAccount('${account.email}')">Quitar</button></li>
       `).join("");
@@ -298,7 +353,7 @@ DASHBOARD_HTML = """
       const data = await response.json();
       document.getElementById("senders").innerHTML = data.map(email => `
         <li>${email} <button onclick="deleteSender('${email}')">Quitar</button></li>
-      `).join("");
+      `).join("") || "<li class='empty'>No hay remitentes monitoreados.</li>";
     }
 
     async function deleteSender(email) {

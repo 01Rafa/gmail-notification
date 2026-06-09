@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from email.utils import parseaddr
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlencode
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 from google_auth_oauthlib.flow import Flow
@@ -29,6 +29,8 @@ PUBSUB_TOPIC = os.getenv("PUBSUB_TOPIC", "gmail-notifications")
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
 OAUTH_REDIRECT_URI = os.getenv("OAUTH_REDIRECT_URI", "")
 ACCOUNTS_FILE = Path(os.getenv("ACCOUNTS_FILE", "accounts.json"))
+GOOGLE_OAUTH_CLIENT_CONFIG_JSON = os.getenv("GOOGLE_OAUTH_CLIENT_CONFIG_JSON", "")
+GOOGLE_OAUTH_CLIENT_CONFIG_BASE64 = os.getenv("GOOGLE_OAUTH_CLIENT_CONFIG_BASE64", "")
 
 
 def get_redirect_uri() -> str:
@@ -58,13 +60,36 @@ def save_accounts(accounts: dict[str, dict[str, Any]]) -> None:
     ACCOUNTS_FILE.write_text(json.dumps(accounts, indent=2), encoding="utf-8")
 
 
+def _oauth_flow() -> Flow:
+    redirect_uri = get_redirect_uri()
+    if GOOGLE_OAUTH_CLIENT_CONFIG_JSON:
+        return Flow.from_client_config(
+            json.loads(GOOGLE_OAUTH_CLIENT_CONFIG_JSON),
+            scopes=SCOPES,
+            redirect_uri=redirect_uri,
+        )
+    if GOOGLE_OAUTH_CLIENT_CONFIG_BASE64:
+        decoded = base64.b64decode(GOOGLE_OAUTH_CLIENT_CONFIG_BASE64).decode("utf-8")
+        return Flow.from_client_config(
+            json.loads(decoded),
+            scopes=SCOPES,
+            redirect_uri=redirect_uri,
+        )
+    if CREDENTIALS_FILE.exists():
+        return Flow.from_client_secrets_file(
+            str(CREDENTIALS_FILE),
+            scopes=SCOPES,
+            redirect_uri=redirect_uri,
+        )
+    raise FileNotFoundError(
+        "No OAuth client config found. Set GOOGLE_OAUTH_CLIENT_CONFIG_JSON "
+        "or GOOGLE_OAUTH_CLIENT_CONFIG_BASE64 in Railway, or provide credentials.json locally."
+    )
+
+
 def create_authorization_url(email: str) -> str:
     _allow_local_http_redirect()
-    flow = Flow.from_client_secrets_file(
-        str(CREDENTIALS_FILE),
-        scopes=SCOPES,
-        redirect_uri=get_redirect_uri(),
-    )
+    flow = _oauth_flow()
     authorization_url, _ = flow.authorization_url(
         access_type="offline",
         include_granted_scopes="true",
@@ -77,11 +102,7 @@ def create_authorization_url(email: str) -> str:
 
 def exchange_oauth_callback(authorization_response: str, fallback_email: str | None = None) -> dict[str, Any]:
     _allow_local_http_redirect()
-    flow = Flow.from_client_secrets_file(
-        str(CREDENTIALS_FILE),
-        scopes=SCOPES,
-        redirect_uri=get_redirect_uri(),
-    )
+    flow = _oauth_flow()
     flow.fetch_token(authorization_response=authorization_response)
     credentials = flow.credentials
 
