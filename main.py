@@ -5,7 +5,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from telegram import Bot
 
@@ -25,10 +25,6 @@ PUBSUB_VERIFICATION_TOKEN = os.getenv("PUBSUB_VERIFICATION_TOKEN", "")
 
 app = FastAPI(title="Gmail Push Alerts")
 alerts: deque[dict[str, Any]] = deque(maxlen=50)
-
-
-class AccountRequest(BaseModel):
-    email: str
 
 
 class SenderRequest(BaseModel):
@@ -87,10 +83,10 @@ async def get_alerts() -> list[dict[str, Any]]:
 
 
 @app.post("/accounts")
-async def add_account(request: AccountRequest) -> dict[str, str]:
-    email = request.email.strip().lower()
+async def add_account(request: Request) -> RedirectResponse:
+    email = await _email_from_request(request)
     auth_url = gmail_watcher.create_authorization_url(email)
-    return {"email": email, "authorization_url": auth_url}
+    return RedirectResponse(auth_url, status_code=303)
 
 
 @app.get("/accounts")
@@ -106,7 +102,7 @@ async def delete_account(email: str) -> dict[str, Any]:
 
 @app.get("/oauth2callback")
 async def oauth2callback(request: Request) -> HTMLResponse:
-    response_url = str(request.url)
+    response_url = _public_callback_url(request)
     state = request.query_params.get("state")
     account = gmail_watcher.exchange_oauth_callback(response_url, state)
     return HTMLResponse(
@@ -150,6 +146,31 @@ async def dashboard() -> str:
     return DASHBOARD_HTML
 
 
+async def _email_from_request(request: Request) -> str:
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        body = await request.json()
+        email = str(body.get("email", ""))
+    else:
+        from urllib.parse import parse_qs
+
+        body = (await request.body()).decode("utf-8")
+        email = parse_qs(body).get("email", [""])[0]
+
+    email = email.strip().lower()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="Email invalido")
+    return email
+
+
+def _public_callback_url(request: Request) -> str:
+    if gmail_watcher.PUBLIC_BASE_URL:
+        query = request.url.query
+        callback_url = f"{gmail_watcher.PUBLIC_BASE_URL}/oauth2callback"
+        return f"{callback_url}?{query}" if query else callback_url
+    return str(request.url)
+
+
 DASHBOARD_HTML = """
 <!doctype html>
 <html lang="es">
@@ -184,11 +205,10 @@ DASHBOARD_HTML = """
   <main>
     <section>
       <h2>Cuentas Gmail</h2>
-      <form id="account-form">
-        <input id="account-email" type="email" placeholder="cuenta@gmail.com" required>
+      <form id="account-form" method="post" action="/accounts">
+        <input id="account-email" name="email" type="email" placeholder="cuenta@gmail.com" required>
         <button type="submit">Agregar cuenta</button>
       </form>
-      <p id="auth-link"></p>
       <ul id="accounts"></ul>
     </section>
 
@@ -288,19 +308,6 @@ DASHBOARD_HTML = """
 
     document.getElementById("notify-button").addEventListener("click", async () => {
       await Notification.requestPermission();
-    });
-
-    document.getElementById("account-form").addEventListener("submit", async event => {
-      event.preventDefault();
-      const email = document.getElementById("account-email").value;
-      const response = await fetch("/accounts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email }),
-      });
-      const data = await response.json();
-      document.getElementById("auth-link").innerHTML =
-        `<a href="${data.authorization_url}" target="_blank">Autorizar ${data.email}</a>`;
     });
 
     document.getElementById("sender-form").addEventListener("submit", async event => {
