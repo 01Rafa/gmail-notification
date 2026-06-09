@@ -1,0 +1,8 @@
+google-auth
+google-auth-oauthlib
+google-api-python-client
+python-dotenv
+fastapi
+uvicorn
+google-cloud-pubsub
+python-telegram-bot
