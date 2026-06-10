@@ -239,6 +239,7 @@ DASHBOARD_HTML = """
     .tag { padding: 4px 8px; border-radius: 999px; background: #e8f3f6; color: #1f6674; font-size: 12px; }
     .empty { color: #5b677a; margin: 12px 0 0; }
     .error { color: #9d1c1c; background: #fff2f2; border: 1px solid #f0b8b8; padding: 10px; border-radius: 6px; }
+    .warning { color: #805400; background: #fff8e5; border: 1px solid #f1d28a; padding: 8px; border-radius: 6px; margin-top: 6px; }
     ul { padding-left: 18px; }
     a { color: #1f7a8c; word-break: break-all; }
   </style>
@@ -339,7 +340,10 @@ DASHBOARD_HTML = """
       status.className = "empty";
       status.textContent = data.length ? "" : "No hay cuentas Gmail conectadas todavia.";
       document.getElementById("accounts").innerHTML = data.map(account => `
-        <li>${account.email} <button onclick="deleteAccount('${account.email}')">Quitar</button></li>
+        <li>
+          <div>${account.email} <button onclick="deleteAccount('${account.email}')">Quitar</button></div>
+          ${account.watch_error ? `<div class="warning">Cuenta conectada, pero Gmail watch fallo: ${account.watch_error}</div>` : ""}
+        </li>
       `).join("");
     }
 

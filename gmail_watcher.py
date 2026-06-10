@@ -121,10 +121,19 @@ def exchange_oauth_callback(authorization_response: str, fallback_email: str | N
         "token_file": str(token_file),
         "history_id": profile.get("historyId"),
         "watch_expiration": None,
+        "watch_error": None,
         "updated_at": int(time.time()),
     }
     save_accounts(accounts)
-    return setup_watch(email)
+    try:
+        return setup_watch(email)
+    except Exception as exc:
+        accounts = load_accounts()
+        account = accounts.setdefault(email, {"email": email})
+        account["watch_error"] = str(exc)
+        account["updated_at"] = int(time.time())
+        save_accounts(accounts)
+        return account
 
 
 def get_account_service(email: str) -> Any:
@@ -160,6 +169,7 @@ def setup_watch(email: str) -> dict[str, Any]:
     account = accounts.setdefault(email, {"email": email})
     account["history_id"] = response.get("historyId", account.get("history_id"))
     account["watch_expiration"] = response.get("expiration")
+    account["watch_error"] = None
     account["updated_at"] = int(time.time())
     save_accounts(accounts)
     return account
