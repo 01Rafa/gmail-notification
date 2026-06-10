@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 from email.utils import parseaddr
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 
 from dotenv import load_dotenv
 from google_auth_oauthlib.flow import Flow
@@ -67,6 +66,7 @@ def _oauth_flow() -> Flow:
             json.loads(GOOGLE_OAUTH_CLIENT_CONFIG_JSON),
             scopes=SCOPES,
             redirect_uri=redirect_uri,
+            autogenerate_code_verifier=False,
         )
     if GOOGLE_OAUTH_CLIENT_CONFIG_BASE64:
         decoded = base64.b64decode(GOOGLE_OAUTH_CLIENT_CONFIG_BASE64).decode("utf-8")
@@ -74,12 +74,14 @@ def _oauth_flow() -> Flow:
             json.loads(decoded),
             scopes=SCOPES,
             redirect_uri=redirect_uri,
+            autogenerate_code_verifier=False,
         )
     if CREDENTIALS_FILE.exists():
         return Flow.from_client_secrets_file(
             str(CREDENTIALS_FILE),
             scopes=SCOPES,
             redirect_uri=redirect_uri,
+            autogenerate_code_verifier=False,
         )
     raise FileNotFoundError(
         "No OAuth client config found. Set GOOGLE_OAUTH_CLIENT_CONFIG_JSON "
@@ -95,7 +97,7 @@ def create_authorization_url(email: str) -> str:
         include_granted_scopes="true",
         prompt="consent",
         login_hint=email,
-        state=quote(email),
+        state=email,
     )
     return authorization_url
 
