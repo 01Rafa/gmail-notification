@@ -2,6 +2,7 @@ import asyncio
 import html
 import os
 from collections import deque
+from datetime import datetime, timezone
 from typing import Any
 
 from dotenv import load_dotenv
@@ -26,15 +27,16 @@ PUBSUB_VERIFICATION_TOKEN = os.getenv("PUBSUB_VERIFICATION_TOKEN", "")
 
 app = FastAPI(title="Gmail Push Alerts")
 alerts: deque[dict[str, Any]] = deque(maxlen=50)
+webhook_events: deque[dict[str, Any]] = deque(maxlen=50)
 
 
 class SenderRequest(BaseModel):
     email: str
 
 
-async def send_telegram_alert(alert: dict[str, Any]) -> None:
+async def send_telegram_alert(alert: dict[str, Any]) -> str | None:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return
+        return "Telegram is not configured"
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
     message = (
         f"📬 [{alert['account']}] Nuevo email\n"
@@ -43,6 +45,7 @@ async def send_telegram_alert(alert: dict[str, Any]) -> None:
         f"Hora: {alert['time']}"
     )
     await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
+    return None
 
 
 @app.on_event("startup")
@@ -65,22 +68,81 @@ async def health() -> dict[str, str]:
 
 @app.post("/webhook")
 async def webhook(request: Request) -> dict[str, Any]:
+    event: dict[str, Any] = {
+        "received_at": _now_iso(),
+        "alerts": 0,
+        "error": None,
+        "telegram_errors": [],
+    }
     if PUBSUB_VERIFICATION_TOKEN:
         token = request.query_params.get("token")
         if token != PUBSUB_VERIFICATION_TOKEN:
             raise HTTPException(status_code=403, detail="Invalid webhook token")
 
     payload = await request.json()
-    new_alerts = gmail_watcher.process_pubsub_notification(payload, WATCHED_SENDERS)
+    event["payload_preview"] = _payload_preview(payload)
+    try:
+        new_alerts = gmail_watcher.process_pubsub_notification(payload, WATCHED_SENDERS)
+    except Exception as exc:
+        event["error"] = str(exc)
+        webhook_events.appendleft(event)
+        raise
+
     for alert in new_alerts:
         alerts.appendleft(alert)
-        await send_telegram_alert(alert)
+        try:
+            telegram_error = await send_telegram_alert(alert)
+            if telegram_error:
+                event["telegram_errors"].append(telegram_error)
+        except Exception as exc:
+            event["telegram_errors"].append(str(exc))
+    event["alerts"] = len(new_alerts)
+    webhook_events.appendleft(event)
     return {"ok": True, "alerts": len(new_alerts)}
 
 
 @app.get("/alerts")
 async def get_alerts() -> list[dict[str, Any]]:
     return list(alerts)
+
+
+@app.get("/debug/status")
+async def debug_status() -> dict[str, Any]:
+    return {
+        "accounts": gmail_watcher.list_accounts(),
+        "alerts_count": len(alerts),
+        "latest_alerts": list(alerts)[:5],
+        "latest_webhooks": list(webhook_events)[:10],
+        "watched_senders": sorted(WATCHED_SENDERS),
+        "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
+        "pubsub_verification_enabled": bool(PUBSUB_VERIFICATION_TOKEN),
+        "google_cloud_project": gmail_watcher.GOOGLE_CLOUD_PROJECT,
+        "pubsub_topic": gmail_watcher.PUBSUB_TOPIC,
+        "public_base_url": gmail_watcher.PUBLIC_BASE_URL,
+        "oauth_redirect_uri": gmail_watcher.get_redirect_uri(),
+    }
+
+
+@app.post("/debug/test-alert")
+async def debug_test_alert() -> dict[str, Any]:
+    alert = {
+        "id": f"debug-{int(datetime.now(timezone.utc).timestamp())}",
+        "thread_id": "debug",
+        "account": "debug",
+        "from": "debug@example.com",
+        "sender_email": "debug@example.com",
+        "subject": "Prueba de alerta",
+        "time": _now_iso(),
+        "snippet": "Esta alerta prueba la web y Telegram sin depender de Gmail Pub/Sub.",
+        "starred": False,
+    }
+    alerts.appendleft(alert)
+    telegram_error = None
+    try:
+        telegram_error = await send_telegram_alert(alert)
+    except Exception as exc:
+        telegram_error = str(exc)
+    return {"ok": telegram_error is None, "alert": alert, "telegram_error": telegram_error}
 
 
 @app.post("/accounts")
@@ -190,6 +252,20 @@ def _public_callback_url(request: Request) -> str:
     return str(request.url)
 
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _payload_preview(payload: dict[str, Any]) -> dict[str, Any]:
+    message = payload.get("message", payload)
+    return {
+        "has_message": "message" in payload,
+        "message_id": message.get("messageId"),
+        "publish_time": message.get("publishTime"),
+        "has_data": bool(message.get("data")),
+    }
+
+
 def _error_page(title: str, detail: str) -> str:
     safe_title = html.escape(title)
     safe_detail = html.escape(detail)
@@ -277,6 +353,14 @@ DASHBOARD_HTML = """
       </div>
       <div id="alerts"></div>
     </section>
+
+    <section>
+      <div class="row">
+        <h2>Diagnostico</h2>
+        <button type="button" class="secondary" id="test-alert-button">Probar alerta</button>
+      </div>
+      <pre id="debug-status" class="empty"></pre>
+    </section>
   </main>
 
   <script>
@@ -360,6 +444,21 @@ DASHBOARD_HTML = """
       `).join("") || "<li class='empty'>No hay remitentes monitoreados.</li>";
     }
 
+    async function loadDebugStatus() {
+      const response = await fetch("/debug/status");
+      const data = await response.json();
+      document.getElementById("debug-status").textContent = JSON.stringify({
+        telegram_configured: data.telegram_configured,
+        accounts: data.accounts.map(account => ({
+          email: account.email,
+          watch_error: account.watch_error || null,
+          watch_expiration: account.watch_expiration || null,
+        })),
+        watched_senders: data.watched_senders,
+        latest_webhooks: data.latest_webhooks,
+      }, null, 2);
+    }
+
     async function deleteSender(email) {
       await fetch(`/watched-senders/${encodeURIComponent(email)}`, { method: "DELETE" });
       await loadSenders();
@@ -367,6 +466,12 @@ DASHBOARD_HTML = """
 
     document.getElementById("notify-button").addEventListener("click", async () => {
       await Notification.requestPermission();
+    });
+
+    document.getElementById("test-alert-button").addEventListener("click", async () => {
+      await fetch("/debug/test-alert", { method: "POST" });
+      await loadAlerts();
+      await loadDebugStatus();
     });
 
     document.getElementById("sender-form").addEventListener("submit", async event => {
@@ -384,7 +489,9 @@ DASHBOARD_HTML = """
     loadAlerts();
     loadAccounts();
     loadSenders();
+    loadDebugStatus();
     setInterval(loadAlerts, 5000);
+    setInterval(loadDebugStatus, 5000);
   </script>
 </body>
 </html>
